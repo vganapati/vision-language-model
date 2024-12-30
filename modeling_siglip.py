@@ -1,34 +1,20 @@
 from typing import Optional, Tuple
+from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 
+@dataclass
 class SiglipVisionConfig:
-    def __init__(
-            self,
-            hidden_size=768,
-            intermediate_size=3072,
-            num_hidden_layers=12,
-            num_attention_heads=12,
-            num_channels=3,
-            image_size=224,
-            patch_size=16,
-            layer_norm_eps=1e-6,
-            attention_dropout=0.0,
-            num_image_tokens: int = None,
-            **kwargs,
-    ):
-        super().__init__()
-
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-        self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
-        self.num_channels = num_channels
-        self.patch_size = patch_size
-        self.image_size = image_size
-        self.attention_dropout = attention_dropout
-        self.layer_norm_eps = layer_norm_eps
-        self.num_image_tokens = num_image_tokens
+    hidden_size: int = 768
+    intermediate_size: int = 3072
+    num_hidden_layers: int = 12
+    num_attention_heads: int = 12
+    num_channels: int = 3 # R, G, B
+    image_size: int = 224
+    patch_size: int = 16
+    layer_norm_eps: float = 1e-6
+    attention_dropout: float = 0.0
+    num_image_tokens: Optional[int] = field(default=None)
 
 breakpoint()
 
@@ -42,15 +28,17 @@ class SiglipVisionEmbeddings(nn.Module):
 
         self.patch_embedding = nn.Conv2d(
             in_channels=config.num_channels,
-            out_channels=self.embed_dim,
+            out_channels=self.embed_dim, # have in_channels number of kernels for each out_channel
             kernel_size=self.patch_size,
             stride=self.patch_size,
             padding="valid", # this indicates no padding is added
         )
 
+        breakpoint()
+
         self.num_patches = (self.image_size // self.patch_size) ** 2
         self.num_positions = self.num_patches
-        self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
+        self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim) # learned embedding
         self.register_buffer(
             "position_ids",
             torch.arange(self.num_positions).expand((1,-1)),
@@ -183,6 +171,7 @@ class SiglipEncoderLayer(nn.Module):
 
         # [batch_size, num_patches, embed_dim] -> [batch_size, num_patches, embed_dim]
         hidden_states = self.layer_norm1(hidden_states)
+        breakpoint()
 
         # [batch_size, num_patches, embed_dim] -> [batch_size, num_patches, embed_dim]
         hidden_states, _ = self.self_attn(hidden_states)
@@ -205,5 +194,49 @@ class SiglipEncoderLayer(nn.Module):
         return hidden_states
 
 class SiglipEncoder(nn.Module):
+    def __init__(self, config: SiglipVisionConfig):
+        super().__init__()
+        self.config = config
+        self.layers = nn.ModuleList(
+            [SiglipEncoderLayer(config) for _ in range(config.num_hidden_layers)]
+        )
+    
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # hidden_states: [batch_size, num_patches, embed_dim]
 
+        for encoder_layer in self.layers:
+            # [batch_size, num_patches, embed_dim] -> [batch_size, num_patches, embed_dim]
+            hidden_states = encoder_layer(hidden_states)
         
+        return hidden_states
+
+class SiglipVisionTransformer(nn.Module):
+    def __init__(self, config: SiglipVisionConfig):
+        super().__init__()
+        self.config = config
+        embed_dim = config.hidden_size
+
+        self.embeddings = SiglipVisionEmbeddings(config)
+        self.encoder = SiglipEncoder(config)
+        self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+    
+    def foward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+
+        # pixel_values: [batch_size, channels, height, width] -> [batch_size, num_patches, embed_dim]
+        hidden_states = self.embeddings(pixel_values)
+
+        hidden_states = self.encoder(hidden_states)
+        hidden_states = self.post_layernorm(hidden_states)
+
+        return hidden_states
+
+class SiglipVisionModel(nn.Module):
+    def __init__(self, config: SiglipVisionConfig):
+        super().__init__()
+        self.config = config
+        self.vision_model = SiglipVisionTransformer(config)
+    
+    def forward(self, pixel_values):
+        # [batch_size, channels, height, width] -> [batch_size, num_patches, embed_dim]
+        return self.vision_model(pixel_values)
+    
