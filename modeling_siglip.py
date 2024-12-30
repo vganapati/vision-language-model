@@ -14,7 +14,7 @@ class SiglipVisionConfig:
     patch_size: int = 16
     layer_norm_eps: float = 1e-6
     attention_dropout: float = 0.0
-    num_image_tokens: Optional[int] = field(default=None)
+    num_image_tokens: Optional[int] = None
 
 breakpoint()
 
@@ -100,7 +100,8 @@ class SiglipAttention(nn.Module):
         # value_states: [batch_size, num_patches, embed_dim]
         value_states = self.v_proj(hidden_states)
 
-        # [batch_size, num_patches, embed_dim] -> [batch_size, num_heads, num_patches, head_dim]
+        # [batch_size, num_patches, embed_dim] -> [batch_size, num_patches, num_heads, head_dim]
+        # -> [batch_size, num_heads, num_patches, head_dim]
         query_states = query_states.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1,2)
         value_states = value_states.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1,2)

@@ -1,6 +1,8 @@
 # vision-language-model
 Vision Language Model (VLM) running on NERSC
 
+[Video](https://www.youtube.com/watch?v=vAmKB7iPkWw&ab_channel=UmarJamil)
+[GitHub](https://github.com/hkproj/pytorch-paligemma/tree/main)
 
 ## Setup instructions
 
@@ -19,3 +21,7 @@ cd vision-language-model
 
 - [An Image is Worth 16x16 Words](https://arxiv.org/abs/2010.11929)
 -[Sigmoid Loss for Language Image Pre-Training](https://arxiv.org/abs/2303.15343)
+- https://huggingface.co/blog/paligemma
+- https://github.com/google-research/big_vision/tree/main/big_vision/configs/proj/paligemma
+- https://huggingface.co/google/paligemma-3b-pt-224
+- Paligemma paper: https://arxiv.org/abs/2407.07726
