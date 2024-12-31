@@ -3,6 +3,7 @@ Vision Language Model (VLM) running on NERSC
 
 [Video](https://www.youtube.com/watch?v=vAmKB7iPkWw&ab_channel=UmarJamil)
 [GitHub](https://github.com/hkproj/pytorch-paligemma/tree/main)
+Paligemma weights: https://www.kaggle.com/models/google/paligemma-2
 
 ## Setup instructions
 
