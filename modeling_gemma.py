@@ -42,7 +42,7 @@ class GemmaConfig:
                  hidden_size,
                  intermediate_size,
                  num_hidden_layers,
-                 num_attention_heads,
+                 num_attention_heads, # number of heads for the queries
                  num_key_value_heads,
                  head_dim=256,
                  max_position_embeddings=8192,
@@ -359,13 +359,17 @@ class GemmaDecoderLayer(nn.Module):
 
 class GemmaModel(nn.Module):
 
+    """
+    Language Model
+    """
+
     def __init__(self, config: GemmaConfig):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        breakpoint()
+        breakpoint() # understand padding_idx
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
             [GemmaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
@@ -373,6 +377,7 @@ class GemmaModel(nn.Module):
         self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def get_input_embeddings(self):
+        breakpoint()
         return self.embed_tokens
     
     def forward(self,
@@ -405,7 +410,220 @@ class GemmaModel(nn.Module):
         return hidden_states
 
 class GemmaForCausalLM(nn.Module):
-     TBD
+    """
+    Language model + Final linear layer
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.model = GemmaModel(config)
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+    
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+    
+    def tie_weights(self):
+        self.lm_head.weight = self.model.embed_tokens.weight
+
+    def forward(self,
+                attention_mask: Optional[torch.Tensor] = None,
+                position_ids: Optional[torch.Tensor] = None,
+                inputs_embeds: Optional[torch.FloatTensor] = None,
+                kv_cache: Optional[KVCache] = None,
+                ) -> Tuple:
+        
+        # inputs_embeds = [batch_size, seq_len, hidden_size]
+        # outputs = [batch_size, seq_len, hidden_size]
+
+        outputs = self.model(
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            inputs_embeds=inputs_embeds,
+            kv_cache=kv_cache,
+        )
+
+        hidden_states = outputs
+        logits = self.lm_head(hidden_states)
+        logits = logits.float()
+
+        return_data = {
+            "logits": logits,
+        }
+
+        if kv_cache is not None:
+            # return the updated cache
+            return_data["kv_cache"] = kv_cache
+
+        return return_data
+
+class PaliGemmaMultiModalProjector(nn.Module):
+
+    def __init__(self, config: PaliGemmaConfig):
+        super().__init__()
+        self.linear = nn.Linear(config.vision_config.hidden_size, config.vision_config.projection_dim, bias=True)
+    
+    def forward(self, image_features):
+        # [batch_size, num_patches, embed_dim] -> [batch_size, num_patches, projection_dim]
+        hidden_states = self.linear(image_features)
+        return hidden_states
+
+class PaliGemmaForConditionalGeneration(nn.Module):
+    """
+    Main structure
+    """
+
+    def __init__(self, config: PaliGemmaConfig):
+        super().__init__()
+        self.config = config
+        self.vision_tower = SiglipVisionModel(config.vision_config)
+        self.multi_modal_projector = PaliGemmaMultiModalProjector(config)
+        self.vocab_size = config.vocab_size
+
+        self.language_model = GemmaForCausalLM(config.text_config)
+
+        breakpoint()
+        self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
+    
+    def tie_weights(self):
+        return self.language_model.tie_weights()
+    
+    def merge_input_ids_with_image_features(self,
+                                            image_features: torch.Tensor,
+                                            inputs_embeds: torch.Tensor, # embeddings of teokens
+                                            input_ids: torch.Tensor, # numbers of tokens
+                                            attention_mask: torch.Tensor,
+                                            kv_cache: Optional[KVCache] = None,
+                                            ):
+        breakpoint()
+        _, _, hidden_size = image_features.shape # XXX check this is hidden_size
+        batch_size, sequence_length = input_ids.shape
+        dtype, device = inputs_embeds.dtype, inputs_embeds.device
+
+        # [batch_size, seq_len, hidden_size]
+        scaled_image_features = image_features / (self.config.hidden_size**0.5)
+
+        # combine the embeddings of the image tokens, the text tokens, and mask out all the padding tokens
+        final_embedding = torch.zeros(batch_size, sequence_length, hidden_size,
+                                      dtype=dtype, device=device)
+        
+        breakpoint()
+        # [batch_size, seq_len]
+        text_mask = (input_ids != self.config.image_token_index) & (input_ids != self.pad_token_id) # True for text tokens
+        image_mask = input_ids == self.config.image_token_index # True for image tokens
+        pad_mask = input_ids == self.pad_token_id # True for padding tokens, don't have padding tokens in inference
+
+        breakpoint()
+        # We need to expand the masks to the embedding dimension otherwise we can't use them in torch.where
+        text_mask_expanded = text_mask.unsqueeze(-1).expand(-1, -1, hidden_size)
+        pad_mask_expanded = pad_mask.unsqueeze(-1).expand(-1, -1, hidden_size)
+        image_mask_expanded = image_mask.unsqueeze(-1).expand(-1, -1, hidden_size)
+
+        # add the text embeddings
+        final_embedding = torch.where(text_mask_expanded, inputs_embeds, final_embedding)
+
+        breakpoint()
+        # insert image embeddings
+        # we can't use torch.where because the sequence length of scaled_image_features is not equal to the
+        # sequence length of the final embeddings
+        final_embedding = final_embedding.masked_scatter(image_mask_expanded, scaled_image_features)
+
+        # zero out padding tokens
+        final_embedding = torch.where(pad_mask_expanded, torch.zeros_like(final_embedding), final_embedding)
+
+        ### CREATE THE ATTENTION MASK ###
+
+        dtype, device = inputs_embeds.dtype, inputs_embeds.device
+        breakpoint()
+        min_dtype = torch.finfo(dtype).min
+        q_len = inputs_embeds.shape[1]
+
+        if kv_cache is None or kv_cache.num_items() == 0:
+            breakpoint()
+            # prefill step
+            # do not mask any token, because we're in the prefill phase
+            # this only works when we have no padding
+
+            # causal_mask is -inf to mask a value out
+            
+            causal_mask = torch.full(
+                (batch_size, q_len, q_len), fill_value=0, dtype=dtype, device=device
+            )
+        else:
+            breakpoint()
+            # since we are generating tokens, the query must be one single token
+            assert q_len == 1
+            kv_len = kv_cache.num_items() + q_len
+
+            # also in this case we don't need to mask anything, since each query should be able to attend
+            # all previous tokens
+            # this only works when we have no padding
+            causal_mask = torch.full(
+                (batch_size, q_len, kv_len), fill_value=0, dtype=dtype, device=device
+            )
+
+        breakpoint()
+        # add the head dimension
+        # [batch_size, q_len, kv_len] -> [batch_size, num_heads_q, q_len, kv_len]
+        causal_mask = causal_mask.unsqueeze(1)
+
+        if kv_cache is not None and kv_cache.num_items() > 0:
+            # the position of the query is just the last position
+            position_ids = attention_mask.cumsum(-1)[:, -1]
+            if position_ids.dim() == 1:
+                position_ids = position_ids.unsqueeze(0)
+        else:
+            # create position_ids baed on the size of the attention mask
+            # for masked tokens, use the number 1 as position
+            breakpoint()
+            position_ids = (attention_mask.cumsum(-1)).masked_fill_((attention_mask == 0),1).to(device)
+        
+        breakpoint() # are all the contextualized embeddings used for next token prediction or only the last contextualized embedding
+        return final_embedding, causal_mask, position_ids
+    
+    def forward(self,
+                input_ids: torch.LongTensor = None,
+                pixel_values: torch.FloatTensor = None,
+                attention_mask: Optional[torch.Tensor] = None,
+                kv_cache: Optional[KVCache] = None,
+                ) -> Tuple:
+        
+        breakpoint()
+
+        # make sure the input is right-padded
+        assert torch.all(attention_mask == 1), "The input cannot be padded"
+
+        # 1. Extra the input embeddings
+        # shape is [batch_size, seq_len, hidden_size]
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+
+        # 2. Merge text and images
+        # [batch_size, channels, height, width] -> [batch_size, num_patches, embed_dim]
+        selected_image_feature = self.vision_tower(pixel_values.to(inputs_embeds.dtype))
+
+        # [batch_size, num_patches, embed_dim] -> [batch_size, num_patches, hidden_size]
+        image_features = self.multi_modal_projector(selected_image_feature)
+
+        # Merge the embeddings of the text tokens and the image tokens
+        inputs_embeds, attention_mask, position_ids = self._merge_ids_with_image_features(image_features,
+                                                                                          inputs_embeds,
+                                                                                          input_ids,
+                                                                                          attention_mask,
+                                                                                          kv_cache,
+                                                                                          )
+        
+        outputs = self.language_model(attention_mask=attention_mask,
+                                      position_ids=position_ids,
+                                      inputs_embeds=inputs_embeds,
+                                      kv_cache=kv_cache,
+                                      )
+        
+        return outputs
+        
+
+
+
 
 
         
