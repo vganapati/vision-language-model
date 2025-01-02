@@ -14,11 +14,21 @@ module load python
 module avail pytorch
 module load pytorch/2.3.1
 
-conda create -n vlm
-conda activate vlm
+conda create --prefix /global/common/software/$PROJECT_ID/vlm
+conda activate /global/common/software/$PROJECT_ID/vlm
+pip install safetensors
 
 
 cd vision-language-model
+
+
+export HF_HOME=$SCRATCH
+huggingface-cli login  
+
+mkdir paligemma
+cd paligemma
+
+huggingface-cli download google/paligemma-3b-pt-224
 
 ## References
 
