@@ -15,14 +15,16 @@ class KVCache():
         if len(self.key_cache) == 0:
             return 0
         else:
-            # key_cache = [batch_size, num_heads_kv, seq_len, head_dim]
+            breakpoint()
+            # key_cache = [layers, batch_size, num_heads_kv, seq_len, head_dim]
             return self.key_cache[0].shape[-2]
     
     def update(self,
-               key_states: torch.Tensor,
-               value_states: torch.Tensor,
+               key_states: torch.Tensor, # [batch_size, num_heads_kv, seq_len, head_dim]
+               value_states: torch.Tensor, # [batch_size, num_heads_kv, seq_len, head_dim]
                layer_idx: int,
                ) -> Tuple[torch.Tensor, torch.Tensor]:
+        breakpoint()
         if len(self.key_cache) <= layer_idx:
             # if we never added anything to the KV-cache for this layer, create it
             self.key_cache.append(key_states)
@@ -105,20 +107,22 @@ class GemmaRMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.zeros(dim))
+        self.weight = nn.Parameter(torch.zeros(dim)) # one for each feature (g_i) # hidden_dim
     
     def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        breakpoint()
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) # 1 / sqrt(...)
 
     def forward(self, x):
         output = self._norm(x.float())
         # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
         # See https://github.com/huggingface/transformers/pull/29402
-        output = output * (1.0 + self.weight.float())
+        output = output * (1.0 + self.weight.float()) # weight is initially 1
         return output.type_as(x)
 
 class GemmaRotaryEmbedding(nn.Module):
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
+    def __init__(self, dim, # head dim
+                 max_position_embeddings=2048, base=10000, device=None):
         super().__init__()
 
         self.dim = dim # it is set to the head_dim
@@ -173,6 +177,7 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
+    breakpoint()
     cos = cos.unsqueeze(unsqueeze_dim) # add the head dimension
     sin = sin.unsqueeze(unsqueeze_dim) # add the head dimension
 
@@ -208,6 +213,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
+    breakpoint()
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads*n_rep, slen, head_dim)
 
@@ -221,13 +227,29 @@ class GemmaAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = config.head_dim
-        self.num_key_value_heads = config.num_key_value_heads
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        self.max_position_embeddings = config.max_position_embeddings
+        self.num_key_value_heads = config.num_key_value_heads # for grouped query attention
+
+        assert self.num_heads % self.num_key_value_heads == 0
+
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads # for grouped query attention
+        self.max_position_embeddings = config.max_position_embeddings # how many positions we can encode with RoPE
         self.rope_theta = config.rope_theta
         self.is_casual = True
 
         assert self.hidden_size % self.num_heads == 0
+
+        breakpoint() # self.head_dim
+
+        """
+        Example Values:
+
+        num_heads = 8
+        hidden_size = 1024
+        head_dim = 1024 / 8 = 128
+        Wq is [1024, 8*128] = [1024, 1024]
+        Wk is [1024, 2*128] = [1024, 256]
+        Wv is [1024, 2*128] = [1024, 256]
+        """
 
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads*self.head_dim, bias=config.attention_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads*self.head_dim, bias = config.attention_bias)
@@ -242,10 +264,12 @@ class GemmaAttention(nn.Module):
     def forward(self,
                 hidden_states: torch.Tensor,
                 attention_mask: Optional[torch.Tensor] = None,
-                position_ids: Optional[torch.LongTensor],
+                position_ids: Optional[torch.LongTensor] = None,
                 kv_cache: Optional[KVCache] = None,
                 **kwargs,
                 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        
+        breakpoint()
         bsz, q_len, _ = hidden_states.size() # [batch_size, seq_len, hidden_size]
 
         # [batch_size, seq_len, num_heads_q * head_dim]
@@ -269,9 +293,11 @@ class GemmaAttention(nn.Module):
         # [batch_size, seq_len, head_dim], [batch_size, seq_len, head_dim]
         cos, sin = self.rotary_emb(value_states, position_ids, seq_len=None)
 
+        breakpoint()
         # [batch_size, num_heads_q, seq_len, head_dim], [batch_size, num_heads_kv, seq_len, head_dim]
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
+        breakpoint()
         if kv_cache is not None:
             key_states, value_states = kv_cache.update(key_states, value_states, self.layer_idx)
         
@@ -321,6 +347,7 @@ class GemmaDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
 
+        breakpoint() # layer_idx
         self.self_attn = GemmaAttention(config=config, layer_idx=layer_idx)
 
         self.mlp = GemmaMLP(config)
